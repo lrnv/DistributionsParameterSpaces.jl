@@ -433,8 +433,96 @@ using Test
     end
 
 
+    @testset "Extended distribution mappings" begin
+        cases = (
+            (BernoulliLogit(0.3), (:logitp,), 1),
+            (BetaBinomial(10, 2.0, 3.0), (:α, :β), 2),
+            (BetaPrime(2.0, 3.0), (:α, :β), 2),
+            (LogitNormal(0.0, 1.0), (:μ, :σ), 2),
+            (Laplace(0.0, 1.0), (:μ, :θ), 2),
+            (Logistic(0.0, 1.0), (:μ, :θ), 2),
+            (Gumbel(0.0, 1.0), (:μ, :θ), 2),
+            (Levy(0.0, 1.0), (:μ, :σ), 2),
+            (Biweight(0.0, 1.0), (:μ, :σ), 2),
+            (Cosine(0.0, 1.0), (:μ, :σ), 2),
+            (Epanechnikov(0.0, 1.0), (:μ, :σ), 2),
+            (SymTriangularDist(0.0, 1.0), (:μ, :σ), 2),
+            (Triweight(0.0, 1.0), (:μ, :σ), 2),
+            (Frechet(2.0, 3.0), (:α, :θ), 2),
+            (InverseGamma(2.0, 3.0), (:α, :θ), 2),
+            (InverseGaussian(2.0, 3.0), (:μ, :λ), 2),
+            (Kumaraswamy(2.0, 3.0), (:a, :b), 2),
+            (LogLogistic(2.0, 3.0), (:α, :β), 2),
+            (Pareto(2.0, 3.0), (:α, :θ), 2),
+            (Weibull(2.0, 3.0), (:α, :θ), 2),
+            (GeneralizedExtremeValue(0.0, 1.0, 0.2), (:μ, :σ, :ξ), 3),
+            (GeneralizedPareto(0.0, 1.0, 0.2), (:μ, :σ, :ξ), 3),
+            (JohnsonSU(0.0, 1.0, 0.0, 1.0), (:ξ, :λ, :γ, :δ), 4),
+            (Lindley(1.0), (:θ,), 1),
+            (Semicircle(1.0), (:r,), 1),
+            (NormalCanon(0.0, 1.0), (:η, :λ), 2),
+            (NoncentralBeta(2.0, 3.0, 0.5), (:α, :β, :λ), 3),
+            (NoncentralChisq(2.0, 0.5), (:ν, :λ), 2),
+            (NoncentralF(2.0, 3.0, 0.5), (:ν1, :ν2, :λ), 3),
+            (NoncentralT(3.0, 0.5), (:ν, :λ), 2),
+            (PGeneralizedGaussian(0.0, 1.0, 2.0), (:μ, :α, :p), 3),
+            (Rician(0.5, 1.0), (:ν, :σ), 2),
+            (SkewNormal(0.0, 1.0, 0.5), (:ξ, :ω, :α), 3),
+            (VonMises(0.0, 1.0), (:μ, :κ), 2),
+            (Geometric(0.4), (:p,), 1),
+            (NegativeBinomial(2.0, 0.4), (:r, :p), 2),
+            (Poisson(1.5), (:λ,), 1),
+            (Skellam(1.0, 2.0), (:μ1, :μ2), 2),
+            (Dirac(0.0), (:x,), 1),
+            (Erlang(2, 1.0), (:θ,), 1),
+            (PoissonBinomial([0.2, 0.5, 0.8]), (:p_1, :p_2, :p_3), 3),
+        )
+
+        for (d, symbols, n) in cases
+            p = param_space(d)
+            @test dimension(p) == n
+            @test parameter_symbols(p) == symbols
+
+            θ = unconstrained_example(p)
+            η, J = constrain_with_jac(p, θ)
+
+            @test length(η) == n
+            @test size(J) == (n, n)
+            @test unconstrain(p, η) ≈ θ
+        end
+    end
+
+    @testset "Structural-only parameter spaces" begin
+        for d in (
+            Chernoff(),
+            DiscreteUniform(1, 4),
+            Hypergeometric(5, 6, 3),
+            Kolmogorov(),
+            KSDist(10),
+            KSOneSided(10),
+        )
+            p = param_space(d)
+            @test dimension(p) == 0
+            @test parameter_symbols(p) == ()
+            @test constrain(p, Float64[]) == Float64[]
+            @test unconstrain(p, Float64[]) == Float64[]
+            @test logabsdet_constrain_jac(p, Float64[]) == 0.0
+        end
+    end
+
+
+    @testset "Half-open probability spaces" begin
+        p = param_space(Geometric(0.5))
+        @test_throws DomainError unconstrain(p, [0.0])
+        @test unconstrain(p, [1.0]) == [Inf]
+
+        p = param_space(NegativeBinomial(2.0, 0.5))
+        @test_throws DomainError unconstrain(p, [2.0, 0.0])
+        @test unconstrain(p, [2.0, 1.0])[2] == Inf
+    end
+
     @testset "Unsupported distribution" begin
-        @test_throws ArgumentError param_space(Poisson(1.0))
+        @test_throws ArgumentError param_space(Uniform(0.0, 1.0))
     end
 
 end

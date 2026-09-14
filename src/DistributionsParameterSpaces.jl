@@ -31,6 +31,7 @@ struct Id{S} <: AbstractScalarParameterSpace end
 struct Pos{S} <: AbstractScalarParameterSpace end
 struct NonNeg{S} <: AbstractScalarParameterSpace end
 struct Prob{S} <: AbstractScalarParameterSpace end
+struct ProbOpenLeft{S} <: AbstractScalarParameterSpace end
 
 struct PosVec{S} <: AbstractParameterSpace
     n::Int
@@ -42,16 +43,28 @@ struct PosVec{S} <: AbstractParameterSpace
 end
 
 
+struct ProbVec{S} <: AbstractParameterSpace
+    n::Int
+
+    function ProbVec{S}(n::Integer) where {S}
+        n > 0 || throw(ArgumentError("dimension must be positive"))
+        new{S}(Int(n))
+    end
+end
+
+
 Id(s::Symbol)     = Id{s}()
 Pos(s::Symbol)    = Pos{s}()
 NonNeg(s::Symbol) = NonNeg{s}()
 Prob(s::Symbol)   = Prob{s}()
+ProbOpenLeft(s::Symbol) = ProbOpenLeft{s}()
 PosVec(s::Symbol, n::Integer) = PosVec{s}(n)
+ProbVec(s::Symbol, n::Integer) = ProbVec{s}(n)
 
 
 const ProductParameterSpace = Tuple{Vararg{AbstractScalarParameterSpace}}
 const SeparableParameterSpace =
-    Union{AbstractScalarParameterSpace, ProductParameterSpace, PosVec}
+    Union{AbstractScalarParameterSpace, ProductParameterSpace, PosVec, ProbVec}
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +75,7 @@ parameter_symbol(::Id{S}) where {S} = S
 parameter_symbol(::Pos{S}) where {S} = S
 parameter_symbol(::NonNeg{S}) where {S} = S
 parameter_symbol(::Prob{S}) where {S} = S
+parameter_symbol(::ProbOpenLeft{S}) where {S} = S
 
 parameter_symbols(p::AbstractScalarParameterSpace) =
     (parameter_symbol(p),)
@@ -72,10 +86,14 @@ parameter_symbols(p::ProductParameterSpace) =
 parameter_symbols(p::PosVec{S}) where {S} =
     ntuple(i -> Symbol(S, "_", i), p.n)
 
+parameter_symbols(p::ProbVec{S}) where {S} =
+    ntuple(i -> Symbol(S, "_", i), p.n)
+
 
 dimension(::AbstractScalarParameterSpace) = 1
 dimension(p::ProductParameterSpace) = length(p)
 dimension(p::PosVec) = p.n
+dimension(p::ProbVec) = p.n
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +157,7 @@ function _unconstrain(::NonNeg, η)
 end
 
 
-function _constrain_with_jac(::Prob, θ)
+function _constrain_with_jac(::Union{Prob,ProbOpenLeft}, θ)
     # Numerically stable logistic transform
     if θ >= zero(θ)
         z = exp(-θ)
@@ -155,6 +173,14 @@ end
 function _unconstrain(::Prob, η)
     zero(η) <= η <= one(η) ||
         throw(DomainError(η, "parameter must belong to [0, 1]"))
+
+    return log(η) - log1p(-η)
+end
+
+
+function _unconstrain(::ProbOpenLeft, η)
+    zero(η) < η <= one(η) ||
+        throw(DomainError(η, "parameter must belong to (0, 1]"))
 
     return log(η) - log1p(-η)
 end
@@ -236,6 +262,28 @@ end
 
 
 # ---------------------------------------------------------------------------
+# Probability vectors
+# ---------------------------------------------------------------------------
+
+function constrain_with_jac(p::ProbVec{S}, θ) where {S}
+    _check_dimension(p, θ)
+
+    result = [_constrain_with_jac(Prob{S}(), x) for x in θ]
+    η = _promoted_vector(first.(result))
+    dηdθ = _promoted_vector(last.(result))
+
+    return η, _diagonal_matrix(dηdθ)
+end
+
+function unconstrain(p::ProbVec{S}, η) where {S}
+    _check_dimension(p, η)
+
+    θ = [_unconstrain(Prob{S}(), x) for x in η]
+    return _promoted_vector(θ)
+end
+
+
+# ---------------------------------------------------------------------------
 # Derived operations
 # ---------------------------------------------------------------------------
 
@@ -277,11 +325,15 @@ constrained_example(p) =
 # ---------------------------------------------------------------------------
 
 function logabsdet_constrain_jac(p::SeparableParameterSpace, θ)
-    _, J = constrain_with_jac(p, θ)
+    _check_dimension(p, θ)
 
+    n = dimension(p)
+    n == 0 && return 0.0
+
+    _, J = constrain_with_jac(p, θ)
     s = zero(J[1, 1])
 
-    for i in 1:dimension(p)
+    for i in 1:n
         s += log(abs(J[i, i]))
     end
 
@@ -327,29 +379,86 @@ end
 # Distributions.jl integration
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Distributions.jl integration
-# ---------------------------------------------------------------------------
+# Location / scale families
+param_space(::Normal)                   = (Id(:μ), NonNeg(:σ))
+param_space(::LogNormal)                = (Id(:μ), NonNeg(:σ))
+param_space(::LogitNormal)              = (Id(:μ), NonNeg(:σ))
+param_space(::Cauchy)                   = (Id(:μ), Pos(:σ))
+param_space(::Laplace)                  = (Id(:μ), Pos(:θ))
+param_space(::Logistic)                 = (Id(:μ), Pos(:θ))
+param_space(::Gumbel)                   = (Id(:μ), Pos(:θ))
+param_space(::Levy)                     = (Id(:μ), Pos(:σ))
+param_space(::Biweight)                 = (Id(:μ), Pos(:σ))
+param_space(::Cosine)                   = (Id(:μ), Pos(:σ))
+param_space(::Epanechnikov)             = (Id(:μ), Pos(:σ))
+param_space(::SymTriangularDist)        = (Id(:μ), Pos(:σ))
+param_space(::Triweight)                = (Id(:μ), Pos(:σ))
 
-param_space(::Normal)      = (Id(:μ), NonNeg(:σ))
-param_space(::LogNormal)   = (Id(:μ), NonNeg(:σ))
-param_space(::Cauchy)      = (Id(:μ), Pos(:σ))
+# Positive scalar parameters
+param_space(::Exponential)              = Pos(:θ)
+param_space(::Rayleigh)                 = Pos(:σ)
+param_space(::Chi)                      = Pos(:ν)
+param_space(::Chisq)                    = Pos(:ν)
+param_space(::TDist)                    = Pos(:ν)
+param_space(::Lindley)                  = Pos(:θ)
+param_space(::Semicircle)               = Pos(:r)
 
-param_space(::Exponential) = Pos(:θ)
-param_space(::Rayleigh)    = Pos(:σ)
+# Positive pairs / triples
+param_space(::Gamma)                    = (Pos(:α), Pos(:θ))
+param_space(::Beta)                     = (Pos(:α), Pos(:β))
+param_space(::BetaPrime)                = (Pos(:α), Pos(:β))
+param_space(::Frechet)                  = (Pos(:α), Pos(:θ))
+param_space(::InverseGamma)             = (Pos(:α), Pos(:θ))
+param_space(::InverseGaussian)          = (Pos(:μ), Pos(:λ))
+param_space(::Kumaraswamy)              = (Pos(:a), Pos(:b))
+param_space(::LogLogistic)              = (Pos(:α), Pos(:β))
+param_space(::Pareto)                   = (Pos(:α), Pos(:θ))
+param_space(::Weibull)                  = (Pos(:α), Pos(:θ))
+param_space(::FDist)                    = (Pos(:ν1), Pos(:ν2))
+param_space(::PGeneralizedGaussian)     = (Id(:μ), Pos(:α), Pos(:p))
 
-param_space(::Gamma)       = (Pos(:α), Pos(:θ))
-param_space(::Beta)        = (Pos(:α), Pos(:β))
+# Unconstrained shape / location parameters combined with positive scales
+param_space(::GeneralizedExtremeValue)  = (Id(:μ), Pos(:σ), Id(:ξ))
+param_space(::GeneralizedPareto)        = (Id(:μ), Pos(:σ), Id(:ξ))
+param_space(::SkewNormal)               = (Id(:ξ), Pos(:ω), Id(:α))
+param_space(::JohnsonSU)                = (Id(:ξ), Pos(:λ), Id(:γ), Pos(:δ))
 
-param_space(::Chi)         = Pos(:ν)
-param_space(::Chisq)       = Pos(:ν)
-param_space(::TDist)       = Pos(:ν)
-param_space(::FDist)       = (Pos(:ν1), Pos(:ν2))
+# Noncentral families
+param_space(::NoncentralBeta)           = (Pos(:α), Pos(:β), NonNeg(:λ))
+param_space(::NoncentralChisq)          = (Pos(:ν), NonNeg(:λ))
+param_space(::NoncentralF)              = (Pos(:ν1), Pos(:ν2), NonNeg(:λ))
+param_space(::NoncentralT)              = (Pos(:ν), Id(:λ))
 
-param_space(::Bernoulli)   = Prob(:p)
-param_space(::Binomial)    = Prob(:p)
+# Alternative normal parameterization
+param_space(::NormalCanon)              = (Id(:η), Pos(:λ))
 
-param_space(d::Dirichlet)  = PosVec(:α, length(d))
+# Circular / radial families
+param_space(::Rician)                   = (NonNeg(:ν), Pos(:σ))
+param_space(::VonMises)                 = (Id(:μ), NonNeg(:κ))
+
+# Discrete distributions with continuous parameters
+param_space(::Bernoulli)                = Prob(:p)
+param_space(::BernoulliLogit)           = Id(:logitp)
+param_space(::Binomial)                 = Prob(:p)
+param_space(::Geometric)                = ProbOpenLeft(:p)
+param_space(::NegativeBinomial)         = (Pos(:r), ProbOpenLeft(:p))
+param_space(::Poisson)                  = NonNeg(:λ)
+param_space(::Skellam)                  = (NonNeg(:μ1), NonNeg(:μ2))
+param_space(d::PoissonBinomial)         = ProbVec(:p, length(params(d)[1]))
+
+# Distributions with structural discrete parameters
+param_space(::BetaBinomial)             = (Pos(:α), Pos(:β))
+param_space(::Erlang)                   = Pos(:θ)
+param_space(::Chernoff)                 = ()
+param_space(::DiscreteUniform)          = ()
+param_space(::Hypergeometric)           = ()
+param_space(::Kolmogorov)               = ()
+param_space(::KSDist)                   = ()
+param_space(::KSOneSided)               = ()
+
+# Degenerate / vector-parameter distributions
+param_space(::Dirac)                    = Id(:x)
+param_space(d::Dirichlet)               = PosVec(:α, length(d))
 
 param_space(d::Distribution) =
     throw(ArgumentError("parameter space not implemented for $(typeof(d))"))
