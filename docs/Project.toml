@@ -1,0 +1,6 @@
+[deps]
+DistributionsParameterSpaces = "4f407bf5-e3e8-4a0e-b0aa-de5e22a062cc"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+
+[sources]
+DistributionsParameterSpaces = {path = ".."}
