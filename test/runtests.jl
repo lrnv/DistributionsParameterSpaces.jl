@@ -521,8 +521,76 @@ using Test
         @test unconstrain(p, [2.0, 1.0])[2] == Inf
     end
 
+    @testset "Ordered parameter spaces" begin
+        p = param_space(Uniform(0.0, 1.0))
+
+        @test dimension(p) == 2
+        @test parameter_symbols(p) == (:a, :b)
+
+        θ = [1.0, log(2.0)]
+        η, J = constrain_with_jac(p, θ)
+
+        @test η ≈ [1.0, 3.0]
+        @test J ≈ [
+            1.0  0.0
+            1.0  2.0
+        ]
+
+        θ₂, Jinv = unconstrain_with_jac(p, η)
+
+        @test θ₂ ≈ θ
+        @test Jinv ≈ [
+             1.0  0.0
+            -0.5  0.5
+        ]
+
+        @test logabsdet_constrain_jac(p, θ) ≈ log(2.0)
+        @test logabsdet_unconstrain_jac(p, η) ≈ -log(2.0)
+
+        @test constrain(p, unconstrain(p, η)) ≈ η
+        @test_throws DomainError unconstrain(p, [1.0, 1.0])
+        @test_throws DomainError unconstrain(p, [2.0, 1.0])
+
+        # Arcsine has the same a < b geometry.
+        p = param_space(Arcsine(-1.0, 2.0))
+        @test parameter_symbols(p) == (:a, :b)
+        @test unconstrain(p, constrain(p, [-0.3, 0.8])) ≈ [-0.3, 0.8]
+    end
+
+
+    @testset "Positive ordered parameter spaces" begin
+        p = param_space(LogUniform(1.0, 10.0))
+
+        @test dimension(p) == 2
+        @test parameter_symbols(p) == (:a, :b)
+
+        θ = [log(2.0), log(3.0)]
+        η, J = constrain_with_jac(p, θ)
+
+        @test η ≈ [2.0, 5.0]
+        @test J ≈ [
+            2.0  0.0
+            2.0  3.0
+        ]
+
+        θ₂, Jinv = unconstrain_with_jac(p, η)
+
+        @test θ₂ ≈ θ
+        @test Jinv ≈ [
+             0.5      0.0
+            -1 / 3  1 / 3
+        ]
+
+        @test logabsdet_constrain_jac(p, θ) ≈ log(6.0)
+        @test logabsdet_unconstrain_jac(p, η) ≈ -log(6.0)
+
+        @test_throws DomainError unconstrain(p, [0.0, 1.0])
+        @test_throws DomainError unconstrain(p, [2.0, 1.0])
+    end
+
+
     @testset "Unsupported distribution" begin
-        @test_throws ArgumentError param_space(Uniform(0.0, 1.0))
+        @test_throws ArgumentError param_space(TriangularDist(0.0, 1.0, 0.5))
     end
 
 end

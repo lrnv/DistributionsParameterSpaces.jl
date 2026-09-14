@@ -33,6 +33,9 @@ struct NonNeg{S} <: AbstractScalarParameterSpace end
 struct Prob{S} <: AbstractScalarParameterSpace end
 struct ProbOpenLeft{S} <: AbstractScalarParameterSpace end
 
+struct Ordered{A,B} <: AbstractParameterSpace end
+struct PosOrdered{A,B} <: AbstractParameterSpace end
+
 struct PosVec{S} <: AbstractParameterSpace
     n::Int
 
@@ -58,6 +61,8 @@ Pos(s::Symbol)    = Pos{s}()
 NonNeg(s::Symbol) = NonNeg{s}()
 Prob(s::Symbol)   = Prob{s}()
 ProbOpenLeft(s::Symbol) = ProbOpenLeft{s}()
+Ordered(a::Symbol, b::Symbol) = Ordered{a,b}()
+PosOrdered(a::Symbol, b::Symbol) = PosOrdered{a,b}()
 PosVec(s::Symbol, n::Integer) = PosVec{s}(n)
 ProbVec(s::Symbol, n::Integer) = ProbVec{s}(n)
 
@@ -77,6 +82,9 @@ parameter_symbol(::NonNeg{S}) where {S} = S
 parameter_symbol(::Prob{S}) where {S} = S
 parameter_symbol(::ProbOpenLeft{S}) where {S} = S
 
+parameter_symbols(::Ordered{A,B}) where {A,B} = (A, B)
+parameter_symbols(::PosOrdered{A,B}) where {A,B} = (A, B)
+
 parameter_symbols(p::AbstractScalarParameterSpace) =
     (parameter_symbol(p),)
 
@@ -91,6 +99,7 @@ parameter_symbols(p::ProbVec{S}) where {S} =
 
 
 dimension(::AbstractScalarParameterSpace) = 1
+dimension(::Union{Ordered,PosOrdered}) = 2
 dimension(p::ProductParameterSpace) = length(p)
 dimension(p::PosVec) = p.n
 dimension(p::ProbVec) = p.n
@@ -236,6 +245,68 @@ end
 
 
 # ---------------------------------------------------------------------------
+# Ordered pairs
+# ---------------------------------------------------------------------------
+
+function constrain_with_jac(p::Ordered, θ)
+    _check_dimension(p, θ)
+
+    a = θ[1]
+    w = exp(θ[2])
+    b = a + w
+
+    η = _promoted_vector((a, b))
+    J = [
+        one(w)  zero(w)
+        one(w)  w
+    ]
+
+    return η, J
+end
+
+
+function unconstrain(p::Ordered, η)
+    _check_dimension(p, η)
+
+    a, b = η
+    b > a ||
+        throw(DomainError(η, "parameters must satisfy a < b"))
+
+    return _promoted_vector((a, log(b - a)))
+end
+
+
+function constrain_with_jac(p::PosOrdered, θ)
+    _check_dimension(p, θ)
+
+    a = exp(θ[1])
+    w = exp(θ[2])
+    b = a + w
+
+    η = _promoted_vector((a, b))
+    J = [
+        a  zero(a)
+        a  w
+    ]
+
+    return η, J
+end
+
+
+function unconstrain(p::PosOrdered, η)
+    _check_dimension(p, η)
+
+    a, b = η
+    a > zero(a) ||
+        throw(DomainError(η, "first parameter must be strictly positive"))
+    b > a ||
+        throw(DomainError(η, "parameters must satisfy 0 < a < b"))
+
+    return _promoted_vector((log(a), log(b - a)))
+end
+
+
+# ---------------------------------------------------------------------------
 # Positive vectors
 # ---------------------------------------------------------------------------
 
@@ -305,6 +376,37 @@ function unconstrain_with_jac(p::SeparableParameterSpace, η)
 end
 
 
+function unconstrain_with_jac(p::Ordered, η)
+    θ = unconstrain(p, η)
+
+    w = η[2] - η[1]
+    iw = inv(w)
+
+    J = [
+        one(w)  zero(w)
+        -iw     iw
+    ]
+
+    return θ, J
+end
+
+
+function unconstrain_with_jac(p::PosOrdered, η)
+    θ = unconstrain(p, η)
+
+    a = η[1]
+    w = η[2] - η[1]
+    iw = inv(w)
+
+    J = [
+        inv(a)  zero(a)
+        -iw     iw
+    ]
+
+    return θ, J
+end
+
+
 unconstrain_jac(p, η) =
     last(unconstrain_with_jac(p, η))
 
@@ -347,6 +449,40 @@ function logabsdet_unconstrain_jac(p::SeparableParameterSpace, η)
 end
 
 
+function logabsdet_constrain_jac(p::Ordered, θ)
+    _check_dimension(p, θ)
+    return θ[2]
+end
+
+function logabsdet_unconstrain_jac(p::Ordered, η)
+    _check_dimension(p, η)
+
+    a, b = η
+    b > a ||
+        throw(DomainError(η, "parameters must satisfy a < b"))
+
+    return -log(b - a)
+end
+
+
+function logabsdet_constrain_jac(p::PosOrdered, θ)
+    _check_dimension(p, θ)
+    return θ[1] + θ[2]
+end
+
+function logabsdet_unconstrain_jac(p::PosOrdered, η)
+    _check_dimension(p, η)
+
+    a, b = η
+    a > zero(a) ||
+        throw(DomainError(η, "first parameter must be strictly positive"))
+    b > a ||
+        throw(DomainError(η, "parameters must satisfy 0 < a < b"))
+
+    return -log(a) - log(b - a)
+end
+
+
 # Faster specialization for positive vectors
 function logabsdet_constrain_jac(p::PosVec, θ)
     _check_dimension(p, θ)
@@ -378,6 +514,11 @@ end
 # ---------------------------------------------------------------------------
 # Distributions.jl integration
 # ---------------------------------------------------------------------------
+
+# Ordered endpoints
+param_space(::Uniform)                  = Ordered(:a, :b)
+param_space(::Arcsine)                  = Ordered(:a, :b)
+param_space(::LogUniform)               = PosOrdered(:a, :b)
 
 # Location / scale families
 param_space(::Normal)                   = (Id(:μ), NonNeg(:σ))
