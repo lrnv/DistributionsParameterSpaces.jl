@@ -1,6 +1,6 @@
 name = "DistributionsParameterSpaces"
 uuid = "4f407bf5-e3e8-4a0e-b0aa-de5e22a062cc"
-version = "1.0.0-DEV"
+version = "0.0.1"
 authors = ["Oskar Laverny <oskar.laverny@univ-amu.fr> and contributors"]
 
 [deps]
