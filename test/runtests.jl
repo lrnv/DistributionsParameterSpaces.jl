@@ -779,8 +779,11 @@ using Test
             0.0  0.0  1.0  0.0
             0.0  0.0  0.0  1.0
         ]
-        @test logabsdet_constrain_jac(p, θ) +
-              logabsdet_unconstrain_jac(p, η) ≈ 0.0
+        @test isapprox(
+            logabsdet_constrain_jac(p, θ) +
+            logabsdet_unconstrain_jac(p, η),
+            0.0; atol=1e-12, rtol=0.0,
+        )
 
         @test_throws DomainError unconstrain(p, [0.0, 0.5, 0.5, 1.0])
         @test_throws DomainError unconstrain(p, [0.0, 1.0, -1.0, 1.0])
