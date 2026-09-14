@@ -76,6 +76,46 @@ struct ProbVec{S} <: AbstractParameterSpace
 end
 
 
+struct RealVec{S} <: AbstractParameterSpace
+    n::Int
+
+    function RealVec{S}(n::Integer) where {S}
+        n >= 0 || throw(ArgumentError("dimension must be nonnegative"))
+        new{S}(Int(n))
+    end
+end
+
+
+struct RealMat{S} <: AbstractParameterSpace
+    m::Int
+    n::Int
+
+    function RealMat{S}(m::Integer, n::Integer) where {S}
+        m >= 0 || throw(ArgumentError("number of rows must be nonnegative"))
+        n >= 0 || throw(ArgumentError("number of columns must be nonnegative"))
+        new{S}(Int(m), Int(n))
+    end
+end
+
+
+struct SPD{S} <: AbstractParameterSpace
+    n::Int
+
+    function SPD{S}(n::Integer) where {S}
+        n > 0 || throw(ArgumentError("matrix dimension must be positive"))
+        new{S}(Int(n))
+    end
+end
+
+
+struct Neg{S} <: AbstractScalarParameterSpace end
+
+
+struct Prefixed{P,S} <: AbstractParameterSpace
+    space::S
+end
+
+
 Id(s::Symbol)     = Id{s}()
 Pos(s::Symbol)    = Pos{s}()
 NonNeg(s::Symbol) = NonNeg{s}()
@@ -110,11 +150,16 @@ end
 
 PosVec(s::Symbol, n::Integer) = PosVec{s}(n)
 ProbVec(s::Symbol, n::Integer) = ProbVec{s}(n)
+RealVec(s::Symbol, n::Integer) = RealVec{s}(n)
+RealMat(s::Symbol, m::Integer, n::Integer) = RealMat{s}(m, n)
+SPD(s::Symbol, n::Integer) = SPD{s}(n)
+Neg(s::Symbol) = Neg{s}()
+Prefixed(prefix::Symbol, space) = Prefixed{prefix,typeof(space)}(space)
 
 
-const ProductParameterSpace = Tuple{Vararg{AbstractScalarParameterSpace}}
+const ProductParameterSpace = Tuple{Vararg{AbstractParameterSpace}}
 const SeparableParameterSpace =
-    Union{AbstractScalarParameterSpace, ProductParameterSpace, PosVec, ProbVec}
+    Union{AbstractScalarParameterSpace, PosVec, ProbVec, RealVec, RealMat}
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +174,7 @@ parameter_symbol(::ProbOpen{S}) where {S} = S
 parameter_symbol(::ProbOpenLeft{S}) where {S} = S
 parameter_symbol(::ProbOpenRight{S}) where {S} = S
 parameter_symbol(::Lower{S}) where {S} = S
+parameter_symbol(::Neg{S}) where {S} = S
 
 parameter_symbols(::Ordered{A,B}) where {A,B} = (A, B)
 parameter_symbols(::PosOrdered{A,B}) where {A,B} = (A, B)
@@ -141,8 +187,13 @@ parameter_symbols(p::Simplex{S}) where {S} =
 parameter_symbols(p::AbstractScalarParameterSpace) =
     (parameter_symbol(p),)
 
-parameter_symbols(p::ProductParameterSpace) =
-    map(parameter_symbol, p)
+function parameter_symbols(p::ProductParameterSpace)
+    result = Symbol[]
+    for q in p
+        append!(result, parameter_symbols(q))
+    end
+    return Tuple(result)
+end
 
 parameter_symbols(p::PosVec{S}) where {S} =
     ntuple(i -> Symbol(S, "_", i), p.n)
@@ -150,15 +201,49 @@ parameter_symbols(p::PosVec{S}) where {S} =
 parameter_symbols(p::ProbVec{S}) where {S} =
     ntuple(i -> Symbol(S, "_", i), p.n)
 
+parameter_symbols(p::RealVec{S}) where {S} =
+    ntuple(i -> Symbol(S, "_", i), p.n)
+
+function parameter_symbols(p::RealMat{S}) where {S}
+    return ntuple(p.m * p.n) do k
+        i = mod1(k, p.m)
+        j = (k - 1) ÷ p.m + 1
+        Symbol(S, "_", i, "_", j)
+    end
+end
+
+function parameter_symbols(p::SPD{S}) where {S}
+    result = Symbol[]
+    for i in 1:p.n
+        for j in 1:i
+            push!(result, Symbol(S, "_", i, "_", j))
+        end
+    end
+    return Tuple(result)
+end
+
+parameter_symbols(p::Prefixed{P}) where {P} =
+    Tuple(Symbol(P, "_", s) for s in parameter_symbols(p.space))
+
 
 dimension(::AbstractScalarParameterSpace) = 1
 dimension(::Union{Ordered,PosOrdered}) = 2
 dimension(::Between) = 3
 dimension(::NIG) = 4
 dimension(p::Simplex) = p.n - 1
-dimension(p::ProductParameterSpace) = length(p)
+function dimension(p::ProductParameterSpace)
+    n = 0
+    for q in p
+        n += dimension(q)
+    end
+    return n
+end
 dimension(p::PosVec) = p.n
 dimension(p::ProbVec) = p.n
+dimension(p::RealVec) = p.n
+dimension(p::RealMat) = p.m * p.n
+dimension(p::SPD) = p.n * (p.n + 1) ÷ 2
+dimension(p::Prefixed) = dimension(p.space)
 
 constrained_dimension(p) = length(parameter_symbols(p))
 
@@ -207,12 +292,109 @@ function _diagonal_matrix(d)
 end
 
 
+function _identity_matrix(T, n::Integer)
+    J = zeros(T, n, n)
+    for i in 1:n
+        J[i, i] = one(T)
+    end
+    return J
+end
+
+
+function _concatenate_vectors(vs)
+    isempty(vs) && return Float64[]
+
+    total = sum(length, vs)
+    total == 0 && return Float64[]
+
+    Ts = [eltype(v) for v in vs if !isempty(v)]
+    T = isempty(Ts) ? Float64 : promote_type(Ts...)
+    result = Vector{T}(undef, total)
+
+    offset = 0
+    for v in vs
+        for x in v
+            offset += 1
+            result[offset] = x
+        end
+    end
+
+    return result
+end
+
+
+function _blockdiag(blocks)
+    isempty(blocks) && return zeros(Float64, 0, 0)
+
+    nr = sum(B -> size(B, 1), blocks)
+    nc = sum(B -> size(B, 2), blocks)
+
+    Ts = [eltype(B) for B in blocks]
+    T = isempty(Ts) ? Float64 : promote_type(Ts...)
+    result = zeros(T, nr, nc)
+
+    r0 = 0
+    c0 = 0
+    for B in blocks
+        m, n = size(B)
+        for j in 1:n
+            for i in 1:m
+                result[r0 + i, c0 + j] = B[i, j]
+            end
+        end
+        r0 += m
+        c0 += n
+    end
+
+    return result
+end
+
+
+function _invert_lower_triangular(A)
+    n, m = size(A)
+    n == m || throw(DimensionMismatch("matrix must be square"))
+
+    n == 0 && return zeros(eltype(A), 0, 0)
+
+    T = eltype(A)
+    B = zeros(T, n, n)
+
+    for j in 1:n
+        for i in j:n
+            if i == j
+                B[i, j] = inv(A[i, i])
+            else
+                s = zero(T)
+                for k in j:(i - 1)
+                    s += A[i, k] * B[k, j]
+                end
+                B[i, j] = -s / A[i, i]
+            end
+        end
+    end
+
+    return B
+end
+
+
 # ---------------------------------------------------------------------------
 # Scalar transforms
 # ---------------------------------------------------------------------------
 
 _constrain_with_jac(::Id, θ) = (θ, one(θ))
 _unconstrain(::Id, η) = η
+
+
+function _constrain_with_jac(::Neg, θ)
+    η = -exp(θ)
+    return η, η
+end
+
+function _unconstrain(::Neg, η)
+    η < zero(η) ||
+        throw(DomainError(η, "parameter must be strictly negative"))
+    return log(-η)
+end
 
 
 function _constrain_with_jac(::Union{Pos,NonNeg}, θ)
@@ -317,25 +499,37 @@ end
 function constrain_with_jac(p::ProductParameterSpace, θ)
     _check_dimension(p, θ)
 
-    result = ntuple(length(p)) do i
-        _constrain_with_jac(p[i], θ[i])
+    values = Vector{Any}()
+    blocks = Vector{Any}()
+    offset = 0
+
+    for q in p
+        n = dimension(q)
+        θq = view(θ, (offset + 1):(offset + n))
+        ηq, Jq = constrain_with_jac(q, θq)
+        push!(values, ηq)
+        push!(blocks, Jq)
+        offset += n
     end
 
-    η = _promoted_vector(first.(result))
-    dηdθ = _promoted_vector(last.(result))
-
-    return η, _diagonal_matrix(dηdθ)
+    return _concatenate_vectors(values), _blockdiag(blocks)
 end
 
 
 function unconstrain(p::ProductParameterSpace, η)
-    _check_dimension(p, η)
+    _check_constrained_dimension(p, η)
 
-    θ = ntuple(length(p)) do i
-        _unconstrain(p[i], η[i])
+    values = Vector{Any}()
+    offset = 0
+
+    for q in p
+        n = constrained_dimension(q)
+        ηq = view(η, (offset + 1):(offset + n))
+        push!(values, unconstrain(q, ηq))
+        offset += n
     end
 
-    return _promoted_vector(θ)
+    return _concatenate_vectors(values)
 end
 
 
@@ -615,6 +809,187 @@ end
 
 
 # ---------------------------------------------------------------------------
+# Real vectors and matrices
+# ---------------------------------------------------------------------------
+
+function constrain_with_jac(p::Union{RealVec,RealMat}, θ)
+    _check_dimension(p, θ)
+
+    η = collect(θ)
+    T = isempty(η) ? Float64 : eltype(η)
+    return η, _identity_matrix(T, length(η))
+end
+
+
+function unconstrain(p::Union{RealVec,RealMat}, η)
+    _check_constrained_dimension(p, η)
+    return collect(η)
+end
+
+
+# ---------------------------------------------------------------------------
+# Symmetric positive-definite matrices
+#
+# Both θ and η use the lower-triangular ordering
+#
+#   (1,1), (2,1), (2,2), (3,1), (3,2), (3,3), ...
+#
+# θ parameterizes a lower Cholesky factor L. Its diagonal is exponentiated
+# and η contains the independent lower-triangular entries of L*L'.
+# ---------------------------------------------------------------------------
+
+function _spd_pairs(n::Integer)
+    pairs = Tuple{Int,Int}[]
+    for i in 1:n
+        for j in 1:i
+            push!(pairs, (i, j))
+        end
+    end
+    return pairs
+end
+
+
+function _spd_cholesky_from_theta(p::SPD, θ)
+    _check_dimension(p, θ)
+
+    T = isempty(θ) ? Float64 : promote_type(map(typeof, θ)...)
+    L = zeros(T, p.n, p.n)
+
+    for (q, (i, j)) in enumerate(_spd_pairs(p.n))
+        L[i, j] = i == j ? exp(θ[q]) : θ[q]
+    end
+
+    return L
+end
+
+
+function _spd_eta_from_cholesky(L)
+    n = size(L, 1)
+    pairs = _spd_pairs(n)
+
+    T = eltype(L)
+    η = Vector{T}(undef, length(pairs))
+
+    for (q, (i, j)) in enumerate(pairs)
+        s = zero(T)
+        for k in 1:j
+            s += L[i, k] * L[j, k]
+        end
+        η[q] = s
+    end
+
+    return η
+end
+
+
+function _spd_matrix_from_eta(p::SPD, η)
+    _check_constrained_dimension(p, η)
+
+    T = isempty(η) ? Float64 : promote_type(map(typeof, η)...)
+    S = zeros(T, p.n, p.n)
+
+    for (q, (i, j)) in enumerate(_spd_pairs(p.n))
+        S[i, j] = η[q]
+        S[j, i] = η[q]
+    end
+
+    return S
+end
+
+
+function _spd_cholesky_from_eta(p::SPD, η)
+    S = _spd_matrix_from_eta(p, η)
+
+    # sqrt(one(Int)) is Float64, while this preserves floating/AD-like types.
+    T = typeof(sqrt(one(eltype(S))))
+    L = zeros(T, p.n, p.n)
+
+    for i in 1:p.n
+        for j in 1:i
+            s = convert(T, S[i, j])
+            for k in 1:(j - 1)
+                s -= L[i, k] * L[j, k]
+            end
+
+            if i == j
+                s > zero(s) ||
+                    throw(DomainError(η, "matrix must be positive definite"))
+                L[i, j] = sqrt(s)
+            else
+                L[i, j] = s / L[j, j]
+            end
+        end
+    end
+
+    return L
+end
+
+
+function constrain_with_jac(p::SPD, θ)
+    L = _spd_cholesky_from_theta(p, θ)
+    η = _spd_eta_from_cholesky(L)
+    pairs = _spd_pairs(p.n)
+
+    T = eltype(L)
+    J = zeros(T, length(pairs), length(pairs))
+
+    for (q, (i, j)) in enumerate(pairs)
+        for (r, (a, b)) in enumerate(pairs)
+            dL = a == b ? L[a, b] : one(T)
+            v = zero(T)
+
+            if a == i && b <= j
+                v += dL * L[j, b]
+            end
+            if a == j && b <= j
+                v += L[i, b] * dL
+            end
+
+            J[q, r] = v
+        end
+    end
+
+    return η, J
+end
+
+
+function unconstrain(p::SPD, η)
+    L = _spd_cholesky_from_eta(p, η)
+    pairs = _spd_pairs(p.n)
+
+    T = eltype(L)
+    θ = Vector{T}(undef, length(pairs))
+
+    for (q, (i, j)) in enumerate(pairs)
+        θ[q] = i == j ? log(L[i, j]) : L[i, j]
+    end
+
+    return θ
+end
+
+
+function unconstrain_with_jac(p::SPD, η)
+    θ = unconstrain(p, η)
+    _, J = constrain_with_jac(p, θ)
+    return θ, _invert_lower_triangular(J)
+end
+
+
+# ---------------------------------------------------------------------------
+# Prefix wrapper
+# ---------------------------------------------------------------------------
+
+constrain_with_jac(p::Prefixed, θ) =
+    constrain_with_jac(p.space, θ)
+
+unconstrain(p::Prefixed, η) =
+    unconstrain(p.space, η)
+
+unconstrain_with_jac(p::Prefixed, η) =
+    unconstrain_with_jac(p.space, η)
+
+
+# ---------------------------------------------------------------------------
 # Derived operations
 # ---------------------------------------------------------------------------
 
@@ -633,6 +1008,26 @@ function unconstrain_with_jac(p::SeparableParameterSpace, η)
     d = [inv(J[i, i]) for i in 1:n]
 
     return θ, _diagonal_matrix(d)
+end
+
+
+function unconstrain_with_jac(p::ProductParameterSpace, η)
+    _check_constrained_dimension(p, η)
+
+    values = Vector{Any}()
+    blocks = Vector{Any}()
+    offset = 0
+
+    for q in p
+        n = constrained_dimension(q)
+        ηq = view(η, (offset + 1):(offset + n))
+        θq, Jq = unconstrain_with_jac(q, ηq)
+        push!(values, θq)
+        push!(blocks, Jq)
+        offset += n
+    end
+
+    return _concatenate_vectors(values), _blockdiag(blocks)
 end
 
 
@@ -770,6 +1165,65 @@ function logabsdet_unconstrain_jac(p::SeparableParameterSpace, η)
 end
 
 
+function logabsdet_constrain_jac(p::ProductParameterSpace, θ)
+    _check_dimension(p, θ)
+
+    s = 0.0
+    offset = 0
+    for q in p
+        n = dimension(q)
+        θq = view(θ, (offset + 1):(offset + n))
+        s += logabsdet_constrain_jac(q, θq)
+        offset += n
+    end
+    return s
+end
+
+
+function logabsdet_unconstrain_jac(p::ProductParameterSpace, η)
+    _check_constrained_dimension(p, η)
+
+    s = 0.0
+    offset = 0
+    for q in p
+        n = constrained_dimension(q)
+        ηq = view(η, (offset + 1):(offset + n))
+        s += logabsdet_unconstrain_jac(q, ηq)
+        offset += n
+    end
+    return s
+end
+
+
+function logabsdet_constrain_jac(p::SPD, θ)
+    _check_dimension(p, θ)
+
+    pairs = _spd_pairs(p.n)
+    isempty(pairs) && return 0.0
+
+    s = p.n * log(2.0)
+    for (q, (i, j)) in enumerate(pairs)
+        if i == j
+            s += (p.n - i + 2) * θ[q]
+        end
+    end
+    return s
+end
+
+
+function logabsdet_unconstrain_jac(p::SPD, η)
+    θ = unconstrain(p, η)
+    return -logabsdet_constrain_jac(p, θ)
+end
+
+
+logabsdet_constrain_jac(p::Prefixed, θ) =
+    logabsdet_constrain_jac(p.space, θ)
+
+logabsdet_unconstrain_jac(p::Prefixed, η) =
+    logabsdet_unconstrain_jac(p.space, η)
+
+
 function logabsdet_constrain_jac(p::Ordered, θ)
     _check_dimension(p, θ)
     return θ[2]
@@ -879,6 +1333,72 @@ function constrained_namedtuple(p, θ)
 end
 
 # ---------------------------------------------------------------------------
+# Distribution integration helpers
+# ---------------------------------------------------------------------------
+
+function _pd_space(symbol::Symbol, A)
+    n = size(A, 1)
+    name = nameof(typeof(A))
+
+    if name === :ScalMat
+        return Pos(symbol)
+    elseif name === :PDiagMat
+        return PosVec(symbol, n)
+    else
+        return SPD(symbol, n)
+    end
+end
+
+
+function _first_distribution_field(d)
+    for name in propertynames(d)
+        value = getproperty(d, name)
+        value isa Distribution && return value
+    end
+    throw(ArgumentError("could not find an underlying distribution in $(typeof(d))"))
+end
+
+
+function _distribution_container(d)
+    for name in propertynames(d)
+        value = getproperty(d, name)
+
+        if value isa NamedTuple
+            vals = values(value)
+            !isempty(vals) && all(x -> x isa Distribution, vals) && return value
+        elseif value isa AbstractArray
+            !isempty(value) && all(x -> x isa Distribution, value) && return value
+        elseif value isa Tuple
+            !isempty(value) && all(x -> x isa Distribution, value) && return value
+        end
+    end
+
+    throw(ArgumentError("could not find component distributions in $(typeof(d))"))
+end
+
+
+function _product_param_space(d)
+    container = _distribution_container(d)
+
+    if container isa NamedTuple
+        names = keys(container)
+        vals = values(container)
+        spaces = map(names, vals) do name, dist
+            Prefixed(name, param_space(dist))
+        end
+        return Tuple(spaces)
+    end
+
+    vals = collect(container)
+    spaces = Vector{AbstractParameterSpace}(undef, length(vals))
+    for i in eachindex(vals)
+        spaces[i] = Prefixed(Symbol("component", i), param_space(vals[i]))
+    end
+    return Tuple(spaces)
+end
+
+
+# ---------------------------------------------------------------------------
 # Distributions.jl integration
 # ---------------------------------------------------------------------------
 
@@ -978,6 +1498,133 @@ param_space(d::Dirichlet)               = PosVec(:α, length(d))
 # remains structural and is therefore not part of the optimization space.
 param_space(d::Categorical)             = Simplex(:p, probs(d))
 param_space(d::Multinomial)             = Simplex(:p, probs(d))
+
+# Noncentral hypergeometric families: population/sample sizes are structural.
+if isdefined(Distributions, :FisherNoncentralHypergeometric)
+    @eval param_space(::Distributions.FisherNoncentralHypergeometric) = Pos(:ω)
+end
+if isdefined(Distributions, :WalleniusNoncentralHypergeometric)
+    @eval param_space(::Distributions.WalleniusNoncentralHypergeometric) = Pos(:ω)
+end
+
+# Affine wrapper. The sign of the nonzero scale determines the connected chart.
+function param_space(d::Distributions.AffineDistribution)
+    scale_space = d.σ > zero(d.σ) ? Pos(:σ) : Neg(:σ)
+    return (Id(:μ), scale_space, Prefixed(:base, param_space(d.ρ)))
+end
+
+# Multivariate normal families.
+function param_space(d::MvNormal)
+    μ, Σ = params(d)
+    return (RealVec(:μ, length(μ)), _pd_space(:Σ, Σ))
+end
+
+function param_space(d::MvNormalCanon)
+    h, J = params(d)
+    return (RealVec(:h, length(h)), _pd_space(:J, J))
+end
+
+function param_space(d::MvLogNormal)
+    μ, Σ = params(d)
+    return (RealVec(:μ, length(μ)), _pd_space(:Σ, Σ))
+end
+
+param_space(d::MvLogitNormal) =
+    Prefixed(:normal, param_space(d.normal))
+
+# Matrix-variate distributions.
+function param_space(d::MatrixNormal)
+    M, U, V = params(d)
+    m, n = size(M)
+    return (
+        RealMat(:M, m, n),
+        _pd_space(:U, U),
+        _pd_space(:V, V),
+    )
+end
+
+function param_space(d::Wishart)
+    ν, S = params(d)
+    p = size(d, 1)
+
+    if ν > p - 1
+        return (Lower(:ν, p - 1), _pd_space(:S, S))
+    else
+        # Singular Wishart requires integer degrees of freedom; keep ν structural.
+        return _pd_space(:S, S)
+    end
+end
+
+function param_space(d::InverseWishart)
+    ν, Ψ = params(d)
+    p = size(d, 1)
+    return (Lower(:ν, p - 1), _pd_space(:Ψ, Ψ))
+end
+
+function param_space(d::MatrixTDist)
+    ν, M, Σ, Ω = params(d)
+    m, n = size(M)
+    return (
+        Pos(:ν),
+        RealMat(:M, m, n),
+        _pd_space(:Σ, Σ),
+        _pd_space(:Ω, Ω),
+    )
+end
+
+function param_space(d::MatrixBeta)
+    p = size(d, 1)
+    return (Lower(:n1, p - 1), Lower(:n2, p - 1))
+end
+
+function param_space(d::MatrixFDist)
+    ps = params(d)
+    p = size(d, 1)
+    B = ps[end]
+    return (
+        Lower(:n1, p - 1),
+        Lower(:n2, p - 1),
+        _pd_space(:B, B),
+    )
+end
+
+param_space(::LKJ) = Pos(:η)
+param_space(::LKJCholesky) = Pos(:η)
+
+# Generic wrappers. Truncation/censoring bounds, reshape dimensions, and
+# order-statistic ranks/sample sizes are treated as structural.
+param_space(d::Distributions.Truncated) =
+    Prefixed(:base, param_space(d.untruncated))
+
+param_space(d::Distributions.Censored) =
+    Prefixed(:base, param_space(d.uncensored))
+
+param_space(d::Distributions.OrderStatistic) =
+    Prefixed(:base, param_space(_first_distribution_field(d)))
+
+param_space(d::Distributions.JointOrderStatistics) =
+    Prefixed(:base, param_space(_first_distribution_field(d)))
+
+param_space(d::Distributions.ReshapedDistribution) =
+    Prefixed(:base, param_space(_first_distribution_field(d)))
+
+# Mixture models: all component parameters plus a simplex of mixing weights.
+function param_space(d::Distributions.AbstractMixtureModel)
+    cs = components(d)
+    component_spaces = ntuple(length(cs)) do i
+        Prefixed(Symbol("component", i), param_space(cs[i]))
+    end
+    return (component_spaces..., Simplex(:π, probs(d)))
+end
+
+# Product distributions.
+param_space(d::Distributions.ProductDistribution) = _product_param_space(d)
+param_space(d::Distributions.ProductNamedTupleDistribution) = _product_param_space(d)
+
+# Product is deprecated but still present in Distributions 0.25.
+if isdefined(Distributions, :Product)
+    @eval param_space(d::Distributions.Product) = _product_param_space(d)
+end
 
 param_space(d::Distribution) =
     throw(ArgumentError("parameter space not implemented for $(typeof(d))"))

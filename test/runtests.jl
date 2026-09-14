@@ -787,10 +787,235 @@ using Test
         @test_throws DomainError unconstrain(p, [0.0, 2.0, 0.5, 0.0])
     end
 
+    @testset "SPD parameter space" begin
+        p = DistributionsParameterSpaces.SPD(:Σ, 3)
 
-    @testset "Unsupported distribution" begin
-        d = truncated(Normal(), 0.0, Inf)
-        @test_throws ArgumentError param_space(d)
+        @test dimension(p) == 6
+        @test constrained_dimension(p) == 6
+        @test parameter_symbols(p) == (
+            :Σ_1_1,
+            :Σ_2_1, :Σ_2_2,
+            :Σ_3_1, :Σ_3_2, :Σ_3_3,
+        )
+
+        θ = [log(1.2), 0.2, log(0.8), -0.1, 0.3, log(1.5)]
+        η, J = constrain_with_jac(p, θ)
+        θ₂, Jinv = unconstrain_with_jac(p, η)
+
+        @test θ₂ ≈ θ
+        @test Jinv * J ≈ [
+            1.0  0.0  0.0  0.0  0.0  0.0
+            0.0  1.0  0.0  0.0  0.0  0.0
+            0.0  0.0  1.0  0.0  0.0  0.0
+            0.0  0.0  0.0  1.0  0.0  0.0
+            0.0  0.0  0.0  0.0  1.0  0.0
+            0.0  0.0  0.0  0.0  0.0  1.0
+        ]
+
+        @test isapprox(
+            logabsdet_constrain_jac(p, θ) +
+            logabsdet_unconstrain_jac(p, η),
+            0.0; atol=1e-12, rtol=0.0,
+        )
+
+        @test_throws DomainError unconstrain(
+            DistributionsParameterSpaces.SPD(:Σ, 2),
+            [1.0, 2.0, 1.0],
+        )
+    end
+
+
+    @testset "Multivariate normal families" begin
+        Σ = [2.0 0.3; 0.3 1.5]
+
+        d = MvNormal([0.2, -0.4], Σ)
+        p = param_space(d)
+        @test dimension(p) == 5
+        @test constrained_dimension(p) == 5
+        @test parameter_symbols(p) ==
+              (:μ_1, :μ_2, :Σ_1_1, :Σ_2_1, :Σ_2_2)
+
+        θ = unconstrained_example(p)
+        η, J = constrain_with_jac(p, θ)
+        θ₂, Jinv = unconstrain_with_jac(p, η)
+        @test θ₂ ≈ θ
+        @test Jinv * J ≈ [
+            1.0  0.0  0.0  0.0  0.0
+            0.0  1.0  0.0  0.0  0.0
+            0.0  0.0  1.0  0.0  0.0
+            0.0  0.0  0.0  1.0  0.0
+            0.0  0.0  0.0  0.0  1.0
+        ]
+
+        dc = MvNormalCanon([0.1, -0.2], [2.0 0.2; 0.2 1.2])
+        pc = param_space(dc)
+        @test dimension(pc) == 5
+        @test parameter_symbols(pc) ==
+              (:h_1, :h_2, :J_1_1, :J_2_1, :J_2_2)
+
+        dl = MvLogNormal(MvNormal([0.0, 0.3], Σ))
+        pl = param_space(dl)
+        @test dimension(pl) == 5
+        @test parameter_symbols(pl) ==
+              (:μ_1, :μ_2, :Σ_1_1, :Σ_2_1, :Σ_2_2)
+
+        dlogit = MvLogitNormal(MvNormal([0.0, 0.3], Σ))
+        plogit = param_space(dlogit)
+        @test dimension(plogit) == 5
+        @test first(parameter_symbols(plogit)) == :normal_μ_1
+    end
+
+
+    @testset "Matrix-variate distributions" begin
+        A = [2.0 0.2; 0.2 1.5]
+        B = [1.3 0.1; 0.1 1.1]
+        M = [0.0 1.0; -1.0 0.5]
+
+        d = MatrixNormal(M, A, B)
+        p = param_space(d)
+        @test dimension(p) == 10
+        @test constrained_dimension(p) == 10
+        @test parameter_symbols(p)[1:4] ==
+              (:M_1_1, :M_2_1, :M_1_2, :M_2_2)
+
+        θ = unconstrained_example(p)
+        η = constrain(p, θ)
+        @test unconstrain(p, η) ≈ θ
+
+        dw = Wishart(4.0, A)
+        pw = param_space(dw)
+        @test dimension(pw) == 4
+        @test parameter_symbols(pw)[1] == :ν
+
+        dws = Wishart(1, A)
+        pws = param_space(dws)
+        @test dimension(pws) == 3
+        @test parameter_symbols(pws) ==
+              (:S_1_1, :S_2_1, :S_2_2)
+
+        diw = InverseWishart(4.0, A)
+        piw = param_space(diw)
+        @test dimension(piw) == 4
+
+        dmt = MatrixTDist(5.0, M, A, B)
+        pmt = param_space(dmt)
+        @test dimension(pmt) == 11
+        @test first(parameter_symbols(pmt)) == :ν
+
+        dmb = MatrixBeta(2, 3.0, 4.0)
+        pmb = param_space(dmb)
+        @test dimension(pmb) == 2
+        @test parameter_symbols(pmb) == (:n1, :n2)
+
+        dmf = MatrixFDist(3.0, 4.0, A)
+        pmf = param_space(dmf)
+        @test dimension(pmf) == 5
+        @test parameter_symbols(pmf)[1:2] == (:n1, :n2)
+
+        @test dimension(param_space(LKJ(3, 2.0))) == 1
+        @test parameter_symbols(param_space(LKJ(3, 2.0))) == (:η,)
+
+        @test dimension(param_space(LKJCholesky(3, 2.0))) == 1
+        @test parameter_symbols(param_space(LKJCholesky(3, 2.0))) == (:η,)
+    end
+
+
+    @testset "Affine and derived distributions" begin
+        da = Distributions.AffineDistribution(2.0, 3.0, Gamma(2.0, 1.0))
+        pa = param_space(da)
+        @test dimension(pa) == 4
+        @test parameter_symbols(pa) == (:μ, :σ, :base_α, :base_θ)
+
+        da_neg = Distributions.AffineDistribution(2.0, -3.0, Normal())
+        pa_neg = param_space(da_neg)
+        @test dimension(pa_neg) == 4
+        η = [2.0, -3.0, 0.0, 1.0]
+        θ = unconstrain(pa_neg, η)
+        @test constrain(pa_neg, θ) ≈ η
+
+        dt = truncated(Normal(0.0, 1.0), -1.0, 2.0)
+        pt = param_space(dt)
+        @test dimension(pt) == 2
+        @test parameter_symbols(pt) == (:base_μ, :base_σ)
+
+        dc = censored(Normal(0.0, 1.0), -1.0, 2.0)
+        pc = param_space(dc)
+        @test dimension(pc) == 2
+        @test parameter_symbols(pc) == (:base_μ, :base_σ)
+
+        dos = OrderStatistic(Gamma(2.0, 1.0), 10, 3)
+        pos = param_space(dos)
+        @test dimension(pos) == 2
+        @test parameter_symbols(pos) == (:base_α, :base_θ)
+
+        djos = JointOrderStatistics(Normal(), 10, (1, 5, 10))
+        pjos = param_space(djos)
+        @test dimension(pjos) == 2
+        @test parameter_symbols(pjos) == (:base_μ, :base_σ)
+    end
+
+
+    @testset "Mixtures and products" begin
+        dmix = MixtureModel(
+            Normal[
+                Normal(-1.0, 1.0),
+                Normal(2.0, 0.5),
+            ],
+            [0.4, 0.6],
+        )
+
+        pmix = param_space(dmix)
+        @test dimension(pmix) == 5
+        @test constrained_dimension(pmix) == 6
+        @test parameter_symbols(pmix) == (
+            :component1_μ,
+            :component1_σ,
+            :component2_μ,
+            :component2_σ,
+            :π_1,
+            :π_2,
+        )
+
+        θmix = unconstrained_example(pmix)
+        ηmix = constrain(pmix, θmix)
+        @test unconstrain(pmix, ηmix) ≈ θmix
+
+        dprod = product_distribution(UnivariateDistribution[Normal(), Exponential()])
+        pprod = param_space(dprod)
+        @test dimension(pprod) == 3
+        @test parameter_symbols(pprod) == (
+            :component1_μ,
+            :component1_σ,
+            :component2_θ,
+        )
+
+        dnamed = product_distribution((
+            x = Normal(),
+            y = Gamma(2.0, 1.0),
+        ))
+        pnamed = param_space(dnamed)
+        @test dimension(pnamed) == 4
+        @test parameter_symbols(pnamed) ==
+              (:x_μ, :x_σ, :y_α, :y_θ)
+
+        dr = reshape(MvNormal([0.0, 0.0], [1.0 0.0; 0.0 1.0]), 1, 2)
+        pr = param_space(dr)
+        @test dimension(pr) == 5
+    end
+
+
+    @testset "Noncentral hypergeometric distributions" begin
+        if isdefined(Distributions, :FisherNoncentralHypergeometric)
+            d = Distributions.FisherNoncentralHypergeometric(5, 7, 4, 2.0)
+            @test dimension(param_space(d)) == 1
+            @test parameter_symbols(param_space(d)) == (:ω,)
+        end
+
+        if isdefined(Distributions, :WalleniusNoncentralHypergeometric)
+            d = Distributions.WalleniusNoncentralHypergeometric(5, 7, 4, 2.0)
+            @test dimension(param_space(d)) == 1
+            @test parameter_symbols(param_space(d)) == (:ω,)
+        end
     end
 
 end
