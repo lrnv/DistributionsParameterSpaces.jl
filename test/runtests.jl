@@ -589,8 +589,139 @@ using Test
     end
 
 
+    @testset "Triangular parameter space" begin
+        d = TriangularDist(0.0, 2.0, 1.0)
+        p = param_space(d)
+
+        @test dimension(p) == 3
+        @test constrained_dimension(p) == 3
+        @test parameter_symbols(p) == (:a, :b, :c)
+
+        θ = [1.0, log(2.0), 0.0]
+        η, J = constrain_with_jac(p, θ)
+
+        @test η ≈ [1.0, 3.0, 2.0]
+        @test J ≈ [
+            1.0  0.0  0.0
+            1.0  2.0  0.0
+            1.0  1.0  0.5
+        ]
+
+        θ₂, Jinv = unconstrain_with_jac(p, η)
+
+        @test θ₂ ≈ θ
+        @test Jinv ≈ [
+             1.0   0.0   0.0
+            -0.5   0.5   0.0
+            -1.0  -1.0   2.0
+        ]
+
+        @test Jinv * J ≈ [
+            1.0  0.0  0.0
+            0.0  1.0  0.0
+            0.0  0.0  1.0
+        ]
+
+        @test logabsdet_constrain_jac(p, θ) ≈ 0.0
+        @test logabsdet_unconstrain_jac(p, η) ≈ 0.0
+
+        @test unconstrain(p, [0.0, 2.0, 0.0])[3] == -Inf
+        @test unconstrain(p, [0.0, 2.0, 2.0])[3] == Inf
+
+        # Distributions.jl also allows the degenerate a == b == c case.
+        @test unconstrain(p, [1.0, 1.0, 1.0]) == [1.0, -Inf, 0.0]
+
+        @test_throws DomainError unconstrain(p, [0.0, 2.0, 3.0])
+        @test_throws DomainError unconstrain(p, [2.0, 0.0, 1.0])
+    end
+
+
+    @testset "Simplex parameter space" begin
+        d = Categorical([0.2, 0.3, 0.5])
+        p = param_space(d)
+
+        @test dimension(p) == 2
+        @test constrained_dimension(p) == 3
+        @test parameter_symbols(p) == (:p_1, :p_2, :p_3)
+
+        θ = log.([0.2 / 0.5, 0.3 / 0.5])
+        η, J = constrain_with_jac(p, θ)
+
+        @test η ≈ [0.2, 0.3, 0.5]
+        @test size(J) == (3, 2)
+        @test J ≈ [
+             0.16  -0.06
+            -0.06   0.21
+            -0.10  -0.15
+        ]
+
+        θ₂, Jinv = unconstrain_with_jac(p, η)
+
+        @test θ₂ ≈ θ
+        @test size(Jinv) == (2, 3)
+        @test Jinv ≈ [
+            5.0       0.0      -2.0
+            0.0   10 / 3       -2.0
+        ]
+
+        @test Jinv * J ≈ [
+            1.0  0.0
+            0.0  1.0
+        ]
+
+        @test constrain(p, θ₂) ≈ η
+
+        nt = constrained_namedtuple(p, θ)
+        @test nt.p_1 ≈ 0.2
+        @test nt.p_2 ≈ 0.3
+        @test nt.p_3 ≈ 0.5
+
+        # Boundary coordinates are representable when the chosen anchor
+        # remains strictly positive.
+        d_boundary = Categorical([0.0, 0.4, 0.6])
+        p_boundary = param_space(d_boundary)
+        θ_boundary = unconstrain(p_boundary, probs(d_boundary))
+        @test θ_boundary[1] == -Inf
+        @test constrain(p_boundary, θ_boundary) ≈ probs(d_boundary)
+
+        # The anchor is chosen from the instance, so a zero final
+        # probability is not a problem either.
+        d_other_boundary = Categorical([0.7, 0.3, 0.0])
+        p_other_boundary = param_space(d_other_boundary)
+        θ_other_boundary = unconstrain(p_other_boundary, probs(d_other_boundary))
+        @test constrain(p_other_boundary, θ_other_boundary) ≈ probs(d_other_boundary)
+
+        # A one-category categorical has no free coordinate.
+        p1 = param_space(Categorical([1.0]))
+        @test dimension(p1) == 0
+        @test constrained_dimension(p1) == 1
+        @test constrain(p1, Float64[]) == [1.0]
+        @test unconstrain(p1, [1.0]) == Float64[]
+        @test size(constrain_jac(p1, Float64[])) == (1, 0)
+        @test size(unconstrain_jac(p1, [1.0])) == (0, 1)
+
+        @test_throws DomainError unconstrain(p, [0.2, 0.3, 0.4])
+        @test_throws ArgumentError logabsdet_constrain_jac(p, θ)
+        @test_throws ArgumentError logabsdet_unconstrain_jac(p, η)
+    end
+
+
+    @testset "Multinomial simplex mapping" begin
+        d = Multinomial(10, [0.2, 0.3, 0.5])
+        p = param_space(d)
+
+        @test dimension(p) == 2
+        @test constrained_dimension(p) == 3
+        @test parameter_symbols(p) == (:p_1, :p_2, :p_3)
+
+        θ = unconstrain(p, probs(d))
+        @test constrain(p, θ) ≈ probs(d)
+    end
+
+
     @testset "Unsupported distribution" begin
-        @test_throws ArgumentError param_space(TriangularDist(0.0, 1.0, 0.5))
+        d = truncated(Normal(), 0.0, Inf)
+        @test_throws ArgumentError param_space(d)
     end
 
 end

@@ -5,6 +5,7 @@ using Distributions
 export AbstractParameterSpace,
        param_space,
        dimension,
+       constrained_dimension,
        unconstrained_example,
        constrained_example,
        constrain,
@@ -35,6 +36,18 @@ struct ProbOpenLeft{S} <: AbstractScalarParameterSpace end
 
 struct Ordered{A,B} <: AbstractParameterSpace end
 struct PosOrdered{A,B} <: AbstractParameterSpace end
+struct Between{A,B,C} <: AbstractParameterSpace end
+
+struct Simplex{S} <: AbstractParameterSpace
+    n::Int
+    anchor::Int
+
+    function Simplex{S}(n::Integer, anchor::Integer) where {S}
+        n >= 1 || throw(ArgumentError("simplex must contain at least one coordinate"))
+        1 <= anchor <= n || throw(ArgumentError("anchor must belong to 1:n"))
+        new{S}(Int(n), Int(anchor))
+    end
+end
 
 struct PosVec{S} <: AbstractParameterSpace
     n::Int
@@ -63,6 +76,27 @@ Prob(s::Symbol)   = Prob{s}()
 ProbOpenLeft(s::Symbol) = ProbOpenLeft{s}()
 Ordered(a::Symbol, b::Symbol) = Ordered{a,b}()
 PosOrdered(a::Symbol, b::Symbol) = PosOrdered{a,b}()
+Between(a::Symbol, b::Symbol, c::Symbol) = Between{a,b,c}()
+
+Simplex(s::Symbol, n::Integer; anchor::Integer=n) =
+    Simplex{s}(n, anchor)
+
+function Simplex(s::Symbol, p::AbstractVector)
+    isempty(p) && throw(ArgumentError("probability vector must be nonempty"))
+    all(x -> x >= zero(x), p) ||
+        throw(DomainError(p, "probabilities must be nonnegative"))
+
+    total = sum(p)
+    isapprox(total, one(total)) ||
+        throw(DomainError(p, "probabilities must sum to one"))
+
+    anchor = argmax(p)
+    p[anchor] > zero(p[anchor]) ||
+        throw(DomainError(p, "at least one probability must be strictly positive"))
+
+    return Simplex(s, length(p); anchor=anchor)
+end
+
 PosVec(s::Symbol, n::Integer) = PosVec{s}(n)
 ProbVec(s::Symbol, n::Integer) = ProbVec{s}(n)
 
@@ -84,6 +118,10 @@ parameter_symbol(::ProbOpenLeft{S}) where {S} = S
 
 parameter_symbols(::Ordered{A,B}) where {A,B} = (A, B)
 parameter_symbols(::PosOrdered{A,B}) where {A,B} = (A, B)
+parameter_symbols(::Between{A,B,C}) where {A,B,C} = (A, B, C)
+
+parameter_symbols(p::Simplex{S}) where {S} =
+    ntuple(i -> Symbol(S, "_", i), p.n)
 
 parameter_symbols(p::AbstractScalarParameterSpace) =
     (parameter_symbol(p),)
@@ -100,9 +138,13 @@ parameter_symbols(p::ProbVec{S}) where {S} =
 
 dimension(::AbstractScalarParameterSpace) = 1
 dimension(::Union{Ordered,PosOrdered}) = 2
+dimension(::Between) = 3
+dimension(p::Simplex) = p.n - 1
 dimension(p::ProductParameterSpace) = length(p)
 dimension(p::PosVec) = p.n
 dimension(p::ProbVec) = p.n
+
+constrained_dimension(p) = length(parameter_symbols(p))
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +154,16 @@ dimension(p::ProbVec) = p.n
 function _check_dimension(p, x)
     length(x) == dimension(p) ||
         throw(DimensionMismatch(
-            "expected $(dimension(p)) parameters, got $(length(x))"
+            "expected $(dimension(p)) unconstrained parameters, got $(length(x))"
+        ))
+    return nothing
+end
+
+
+function _check_constrained_dimension(p, x)
+    length(x) == constrained_dimension(p) ||
+        throw(DimensionMismatch(
+            "expected $(constrained_dimension(p)) constrained parameters, got $(length(x))"
         ))
     return nothing
 end
@@ -307,6 +358,132 @@ end
 
 
 # ---------------------------------------------------------------------------
+# Bounded interior point: a <= c <= b
+# ---------------------------------------------------------------------------
+
+function constrain_with_jac(p::Between, θ)
+    _check_dimension(p, θ)
+
+    a = θ[1]
+    w = exp(θ[2])
+    q, dq = _constrain_with_jac(Prob{:q}(), θ[3])
+
+    b = a + w
+    c = a + w * q
+
+    η = _promoted_vector((a, b, c))
+    J = [
+        one(w)  zero(w)  zero(w)
+        one(w)  w        zero(w)
+        one(w)  w * q    w * dq
+    ]
+
+    return η, J
+end
+
+
+function unconstrain(p::Between, η)
+    _check_constrained_dimension(p, η)
+
+    a, b, c = η
+
+    a <= c <= b ||
+        throw(DomainError(η, "parameters must satisfy a <= c <= b"))
+
+    if b == a
+        c == a ||
+            throw(DomainError(η, "degenerate bounds require a == b == c"))
+        return _promoted_vector((a, -Inf, 0.0))
+    end
+
+    w = b - a
+    q = (c - a) / w
+    z = _unconstrain(Prob{:q}(), q)
+
+    return _promoted_vector((a, log(w), z))
+end
+
+
+# ---------------------------------------------------------------------------
+# Simplex
+#
+# The unconstrained representation has K - 1 coordinates. One probability
+# coordinate is used as an anchor and its logit is fixed to zero.
+# ---------------------------------------------------------------------------
+
+function constrain_with_jac(p::Simplex, θ)
+    _check_dimension(p, θ)
+
+    k = p.n
+    if k == 1
+        return [1.0], zeros(Float64, 1, 0)
+    end
+
+    # Softmax with the anchor logit fixed to zero.
+    m = max(zero(θ[1]), maximum(θ))
+    anchor_weight = exp(-m)
+    free_weights = exp.(θ .- m)
+    denom = anchor_weight + sum(free_weights)
+
+    T = promote_type(typeof(anchor_weight), eltype(free_weights))
+    η = Vector{T}(undef, k)
+
+    j = 1
+    for i in 1:k
+        if i == p.anchor
+            η[i] = anchor_weight / denom
+        else
+            η[i] = free_weights[j] / denom
+            j += 1
+        end
+    end
+
+    J = zeros(T, k, k - 1)
+
+    j = 1
+    for col_index in 1:k
+        col_index == p.anchor && continue
+
+        for i in 1:k
+            J[i, j] = η[i] * ((i == col_index ? one(T) : zero(T)) - η[col_index])
+        end
+
+        j += 1
+    end
+
+    return η, J
+end
+
+
+function unconstrain(p::Simplex, η)
+    _check_constrained_dimension(p, η)
+
+    all(x -> x >= zero(x), η) ||
+        throw(DomainError(η, "probabilities must be nonnegative"))
+
+    total = sum(η)
+    isapprox(total, one(total)) ||
+        throw(DomainError(η, "probabilities must sum to one"))
+
+    anchor_probability = η[p.anchor]
+    anchor_probability > zero(anchor_probability) ||
+        throw(DomainError(
+            η,
+            "the anchor probability must be strictly positive for this simplex chart",
+        ))
+
+    log_anchor = log(anchor_probability)
+    θ = [
+        log(η[i]) - log_anchor
+        for i in 1:p.n
+        if i != p.anchor
+    ]
+
+    return _promoted_vector(θ)
+end
+
+
+# ---------------------------------------------------------------------------
 # Positive vectors
 # ---------------------------------------------------------------------------
 
@@ -407,6 +584,50 @@ function unconstrain_with_jac(p::PosOrdered, η)
 end
 
 
+function unconstrain_with_jac(p::Between, η)
+    θ = unconstrain(p, η)
+
+    a, b, c = η
+    w = b - a
+    w > zero(w) ||
+        throw(DomainError(η, "inverse Jacobian is undefined for a == b"))
+
+    ca = c - a
+    bc = b - c
+
+    J = [
+        one(w)         zero(w)         zero(w)
+        -inv(w)        inv(w)          zero(w)
+        -inv(ca)       -inv(bc)        inv(ca) + inv(bc)
+    ]
+
+    return θ, J
+end
+
+
+function unconstrain_with_jac(p::Simplex, η)
+    θ = unconstrain(p, η)
+
+    k = p.n
+    if k == 1
+        return θ, zeros(Float64, 0, 1)
+    end
+
+    T = promote_type(map(typeof, η)...)
+    J = zeros(T, k - 1, k)
+
+    j = 1
+    for i in 1:k
+        i == p.anchor && continue
+        J[j, i] = inv(η[i])
+        J[j, p.anchor] = -inv(η[p.anchor])
+        j += 1
+    end
+
+    return θ, J
+end
+
+
 unconstrain_jac(p, η) =
     last(unconstrain_with_jac(p, η))
 
@@ -483,6 +704,36 @@ function logabsdet_unconstrain_jac(p::PosOrdered, η)
 end
 
 
+function logabsdet_constrain_jac(p::Between, θ)
+    _check_dimension(p, θ)
+
+    q, dq = _constrain_with_jac(Prob{:q}(), θ[3])
+    return 2 * θ[2] + log(dq)
+end
+
+function logabsdet_unconstrain_jac(p::Between, η)
+    θ = unconstrain(p, η)
+    return -logabsdet_constrain_jac(p, θ)
+end
+
+
+function logabsdet_constrain_jac(p::Simplex, θ)
+    _check_dimension(p, θ)
+    throw(ArgumentError(
+        "logabsdet is not defined for the rectangular simplex Jacobian; " *
+        "use constrain_with_jac to access the K×(K-1) Jacobian"
+    ))
+end
+
+function logabsdet_unconstrain_jac(p::Simplex, η)
+    _check_constrained_dimension(p, η)
+    throw(ArgumentError(
+        "logabsdet is not defined for the rectangular simplex Jacobian; " *
+        "use unconstrain_with_jac to access the (K-1)×K Jacobian"
+    ))
+end
+
+
 # Faster specialization for positive vectors
 function logabsdet_constrain_jac(p::PosVec, θ)
     _check_dimension(p, θ)
@@ -519,6 +770,7 @@ end
 param_space(::Uniform)                  = Ordered(:a, :b)
 param_space(::Arcsine)                  = Ordered(:a, :b)
 param_space(::LogUniform)               = PosOrdered(:a, :b)
+param_space(::TriangularDist)           = Between(:a, :b, :c)
 
 # Location / scale families
 param_space(::Normal)                   = (Id(:μ), NonNeg(:σ))
@@ -600,6 +852,11 @@ param_space(::KSOneSided)               = ()
 # Degenerate / vector-parameter distributions
 param_space(::Dirac)                    = Id(:x)
 param_space(d::Dirichlet)               = PosVec(:α, length(d))
+
+# Simplex-valued probability parameters. The trial count of Multinomial
+# remains structural and is therefore not part of the optimization space.
+param_space(d::Categorical)             = Simplex(:p, probs(d))
+param_space(d::Multinomial)             = Simplex(:p, probs(d))
 
 param_space(d::Distribution) =
     throw(ArgumentError("parameter space not implemented for $(typeof(d))"))
