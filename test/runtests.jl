@@ -1,13 +1,11 @@
-# using Aqua
+using Aqua
 using Distributions
 using DistributionsParameterSpaces
 using Test
 
-
-# @testset "Aqua" begin
-#     Aqua.test_all(DistributionsParameterSpaces)
-# end
-
+@testset "Aqua" begin
+    Aqua.test_all(DistributionsParameterSpaces)
+end
 
 @testset "DistributionsParameterSpaces.jl" begin
 
