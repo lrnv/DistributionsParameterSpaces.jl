@@ -719,6 +719,75 @@ using Test
     end
 
 
+    @testset "Remaining documented univariate distributions" begin
+        # DiscreteNonParametric: support points are structural; only probabilities vary.
+        d = DiscreteNonParametric([-1.0, 2.0, 4.0], [0.2, 0.3, 0.5])
+        p = param_space(d)
+        @test dimension(p) == 2
+        @test constrained_dimension(p) == 3
+        @test parameter_symbols(p) == (:p_1, :p_2, :p_3)
+        θ = unconstrain(p, probs(d))
+        @test constrain(p, θ) ≈ probs(d)
+
+        # Skewed exponential power: α is strictly inside (0, 1).
+        d = SkewedExponentialPower(0.3, 1.2, 2.5, 0.4)
+        p = param_space(d)
+        @test parameter_symbols(p) == (:μ, :σ, :p, :α)
+        η = [0.3, 1.2, 2.5, 0.4]
+        θ = unconstrain(p, η)
+        @test constrain(p, θ) ≈ η
+        @test_throws DomainError unconstrain(p, [0.0, 1.0, 2.0, 0.0])
+        @test_throws DomainError unconstrain(p, [0.0, 1.0, 2.0, 1.0])
+
+        # StudentizedRange: ν > 0 and k > 1.
+        d = StudentizedRange(10.0, 3.0)
+        p = param_space(d)
+        @test parameter_symbols(p) == (:ν, :k)
+        θ = [log(10.0), log(2.0)]
+        @test constrain(p, θ) ≈ [10.0, 3.0]
+        @test unconstrain(p, [10.0, 3.0]) ≈ θ
+        @test_throws DomainError unconstrain(p, [10.0, 1.0])
+
+        # Soliton: K and M are structural; δ ∈ (0,1), atol ∈ [0,1).
+        d = Soliton(100, 10, 0.1, 0.0)
+        p = param_space(d)
+        @test dimension(p) == 2
+        @test parameter_symbols(p) == (:δ, :atol)
+        θ = unconstrain(p, [0.1, 0.0])
+        @test θ[2] == -Inf
+        @test constrain(p, θ) ≈ [0.1, 0.0]
+        @test_throws DomainError unconstrain(p, [0.0, 0.0])
+        @test_throws DomainError unconstrain(p, [1.0, 0.0])
+        @test_throws DomainError unconstrain(p, [0.1, 1.0])
+
+        # NormalInverseGaussian: α > |β| and δ > 0.
+        d = NormalInverseGaussian(0.5, 2.0, 0.5, 1.5)
+        p = param_space(d)
+        @test dimension(p) == 4
+        @test parameter_symbols(p) == (:μ, :α, :β, :δ)
+
+        η = [0.5, 2.0, 0.5, 1.5]
+        θ = unconstrain(p, η)
+        η₂, J = constrain_with_jac(p, θ)
+        θ₂, Jinv = unconstrain_with_jac(p, η)
+
+        @test η₂ ≈ η
+        @test θ₂ ≈ θ
+        @test Jinv * J ≈ [
+            1.0  0.0  0.0  0.0
+            0.0  1.0  0.0  0.0
+            0.0  0.0  1.0  0.0
+            0.0  0.0  0.0  1.0
+        ]
+        @test logabsdet_constrain_jac(p, θ) +
+              logabsdet_unconstrain_jac(p, η) ≈ 0.0
+
+        @test_throws DomainError unconstrain(p, [0.0, 0.5, 0.5, 1.0])
+        @test_throws DomainError unconstrain(p, [0.0, 1.0, -1.0, 1.0])
+        @test_throws DomainError unconstrain(p, [0.0, 2.0, 0.5, 0.0])
+    end
+
+
     @testset "Unsupported distribution" begin
         d = truncated(Normal(), 0.0, Inf)
         @test_throws ArgumentError param_space(d)

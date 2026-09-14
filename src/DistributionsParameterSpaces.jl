@@ -32,11 +32,18 @@ struct Id{S} <: AbstractScalarParameterSpace end
 struct Pos{S} <: AbstractScalarParameterSpace end
 struct NonNeg{S} <: AbstractScalarParameterSpace end
 struct Prob{S} <: AbstractScalarParameterSpace end
+struct ProbOpen{S} <: AbstractScalarParameterSpace end
 struct ProbOpenLeft{S} <: AbstractScalarParameterSpace end
+struct ProbOpenRight{S} <: AbstractScalarParameterSpace end
+
+struct Lower{S,T} <: AbstractScalarParameterSpace
+    lower::T
+end
 
 struct Ordered{A,B} <: AbstractParameterSpace end
 struct PosOrdered{A,B} <: AbstractParameterSpace end
 struct Between{A,B,C} <: AbstractParameterSpace end
+struct NIG{M,A,B,D} <: AbstractParameterSpace end
 
 struct Simplex{S} <: AbstractParameterSpace
     n::Int
@@ -73,10 +80,14 @@ Id(s::Symbol)     = Id{s}()
 Pos(s::Symbol)    = Pos{s}()
 NonNeg(s::Symbol) = NonNeg{s}()
 Prob(s::Symbol)   = Prob{s}()
+ProbOpen(s::Symbol) = ProbOpen{s}()
 ProbOpenLeft(s::Symbol) = ProbOpenLeft{s}()
+ProbOpenRight(s::Symbol) = ProbOpenRight{s}()
+Lower(s::Symbol, lower) = Lower{s,typeof(lower)}(lower)
 Ordered(a::Symbol, b::Symbol) = Ordered{a,b}()
 PosOrdered(a::Symbol, b::Symbol) = PosOrdered{a,b}()
 Between(a::Symbol, b::Symbol, c::Symbol) = Between{a,b,c}()
+NIG(μ::Symbol, α::Symbol, β::Symbol, δ::Symbol) = NIG{μ,α,β,δ}()
 
 Simplex(s::Symbol, n::Integer; anchor::Integer=n) =
     Simplex{s}(n, anchor)
@@ -114,11 +125,15 @@ parameter_symbol(::Id{S}) where {S} = S
 parameter_symbol(::Pos{S}) where {S} = S
 parameter_symbol(::NonNeg{S}) where {S} = S
 parameter_symbol(::Prob{S}) where {S} = S
+parameter_symbol(::ProbOpen{S}) where {S} = S
 parameter_symbol(::ProbOpenLeft{S}) where {S} = S
+parameter_symbol(::ProbOpenRight{S}) where {S} = S
+parameter_symbol(::Lower{S}) where {S} = S
 
 parameter_symbols(::Ordered{A,B}) where {A,B} = (A, B)
 parameter_symbols(::PosOrdered{A,B}) where {A,B} = (A, B)
 parameter_symbols(::Between{A,B,C}) where {A,B,C} = (A, B, C)
+parameter_symbols(::NIG{M,A,B,D}) where {M,A,B,D} = (M, A, B, D)
 
 parameter_symbols(p::Simplex{S}) where {S} =
     ntuple(i -> Symbol(S, "_", i), p.n)
@@ -139,6 +154,7 @@ parameter_symbols(p::ProbVec{S}) where {S} =
 dimension(::AbstractScalarParameterSpace) = 1
 dimension(::Union{Ordered,PosOrdered}) = 2
 dimension(::Between) = 3
+dimension(::NIG) = 4
 dimension(p::Simplex) = p.n - 1
 dimension(p::ProductParameterSpace) = length(p)
 dimension(p::PosVec) = p.n
@@ -217,7 +233,7 @@ function _unconstrain(::NonNeg, η)
 end
 
 
-function _constrain_with_jac(::Union{Prob,ProbOpenLeft}, θ)
+function _constrain_with_jac(::Union{Prob,ProbOpen,ProbOpenLeft,ProbOpenRight}, θ)
     # Numerically stable logistic transform
     if θ >= zero(θ)
         z = exp(-θ)
@@ -243,6 +259,34 @@ function _unconstrain(::ProbOpenLeft, η)
         throw(DomainError(η, "parameter must belong to (0, 1]"))
 
     return log(η) - log1p(-η)
+end
+
+
+function _unconstrain(::ProbOpen, η)
+    zero(η) < η < one(η) ||
+        throw(DomainError(η, "parameter must belong to (0, 1)"))
+
+    return log(η) - log1p(-η)
+end
+
+
+function _unconstrain(::ProbOpenRight, η)
+    zero(η) <= η < one(η) ||
+        throw(DomainError(η, "parameter must belong to [0, 1)"))
+
+    return log(η) - log1p(-η)
+end
+
+
+function _constrain_with_jac(p::Lower, θ)
+    w = exp(θ)
+    return p.lower + w, w
+end
+
+function _unconstrain(p::Lower, η)
+    η > p.lower ||
+        throw(DomainError(η, "parameter must be strictly greater than $(p.lower)"))
+    return log(η - p.lower)
 end
 
 
@@ -401,6 +445,45 @@ function unconstrain(p::Between, η)
     z = _unconstrain(Prob{:q}(), q)
 
     return _promoted_vector((a, log(w), z))
+end
+
+
+# ---------------------------------------------------------------------------
+# Normal-inverse Gaussian parameters: α > |β|, δ > 0
+# ---------------------------------------------------------------------------
+
+function constrain_with_jac(p::NIG, θ)
+    _check_dimension(p, θ)
+
+    μ = θ[1]
+    γ = exp(θ[2])
+    β = θ[3]
+    δ = exp(θ[4])
+    α = hypot(β, γ)
+
+    η = _promoted_vector((μ, α, β, δ))
+    J = [
+        one(α)      zero(α)       zero(α)  zero(α)
+        zero(α)     γ * γ / α     β / α    zero(α)
+        zero(α)     zero(α)       one(α)   zero(α)
+        zero(α)     zero(α)       zero(α)  δ
+    ]
+
+    return η, J
+end
+
+
+function unconstrain(p::NIG, η)
+    _check_constrained_dimension(p, η)
+
+    μ, α, β, δ = η
+    α > abs(β) ||
+        throw(DomainError(η, "parameters must satisfy α > |β|"))
+    δ > zero(δ) ||
+        throw(DomainError(η, "δ must be strictly positive"))
+
+    γ2 = (α - abs(β)) * (α + abs(β))
+    return _promoted_vector((μ, log(γ2) / 2, β, log(δ)))
 end
 
 
@@ -605,6 +688,23 @@ function unconstrain_with_jac(p::Between, η)
 end
 
 
+function unconstrain_with_jac(p::NIG, η)
+    θ = unconstrain(p, η)
+
+    _, α, β, δ = η
+    γ2 = (α - abs(β)) * (α + abs(β))
+
+    J = [
+        one(α)   zero(α)       zero(α)       zero(α)
+        zero(α)  α / γ2        -β / γ2       zero(α)
+        zero(α)  zero(α)       one(α)        zero(α)
+        zero(α)  zero(α)       zero(α)       inv(δ)
+    ]
+
+    return θ, J
+end
+
+
 function unconstrain_with_jac(p::Simplex, η)
     θ = unconstrain(p, η)
 
@@ -717,6 +817,22 @@ function logabsdet_unconstrain_jac(p::Between, η)
 end
 
 
+function logabsdet_constrain_jac(p::NIG, θ)
+    _check_dimension(p, θ)
+
+    γ = exp(θ[2])
+    β = θ[3]
+    α = hypot(β, γ)
+
+    return 2 * θ[2] - log(α) + θ[4]
+end
+
+function logabsdet_unconstrain_jac(p::NIG, η)
+    θ = unconstrain(p, η)
+    return -logabsdet_constrain_jac(p, θ)
+end
+
+
 function logabsdet_constrain_jac(p::Simplex, θ)
     _check_dimension(p, θ)
     throw(ArgumentError(
@@ -814,7 +930,10 @@ param_space(::PGeneralizedGaussian)     = (Id(:μ), Pos(:α), Pos(:p))
 param_space(::GeneralizedExtremeValue)  = (Id(:μ), Pos(:σ), Id(:ξ))
 param_space(::GeneralizedPareto)        = (Id(:μ), Pos(:σ), Id(:ξ))
 param_space(::SkewNormal)               = (Id(:ξ), Pos(:ω), Id(:α))
+param_space(::SkewedExponentialPower)   = (Id(:μ), Pos(:σ), Pos(:p), ProbOpen(:α))
 param_space(::JohnsonSU)                = (Id(:ξ), Pos(:λ), Id(:γ), Pos(:δ))
+param_space(::NormalInverseGaussian)    = NIG(:μ, :α, :β, :δ)
+param_space(::StudentizedRange)         = (Pos(:ν), Lower(:k, 1.0))
 
 # Noncentral families
 param_space(::NoncentralBeta)           = (Pos(:α), Pos(:β), NonNeg(:λ))
@@ -838,6 +957,7 @@ param_space(::NegativeBinomial)         = (Pos(:r), ProbOpenLeft(:p))
 param_space(::Poisson)                  = NonNeg(:λ)
 param_space(::Skellam)                  = (NonNeg(:μ1), NonNeg(:μ2))
 param_space(d::PoissonBinomial)         = ProbVec(:p, length(params(d)[1]))
+param_space(::Soliton)                  = (ProbOpen(:δ), ProbOpenRight(:atol))
 
 # Distributions with structural discrete parameters
 param_space(::BetaBinomial)             = (Pos(:α), Pos(:β))
@@ -851,6 +971,7 @@ param_space(::KSOneSided)               = ()
 
 # Degenerate / vector-parameter distributions
 param_space(::Dirac)                    = Id(:x)
+param_space(d::DiscreteNonParametric)   = Simplex(:p, probs(d))
 param_space(d::Dirichlet)               = PosVec(:α, length(d))
 
 # Simplex-valued probability parameters. The trial count of Multinomial
